@@ -65,10 +65,42 @@ load_env_file() {
   local env_file="$1"
   [[ -f "$env_file" ]] || die "فایل env پیدا نشد: $env_file"
 
-  set -a
-  # shellcheck disable=SC1090
-  source "$env_file"
-  set +a
+  # Parse KEY=VALUE safely without executing shell code.
+  # Supports:
+  # - empty lines / lines starting with '#'
+  # - optional 'export ' prefix
+  # - unquoted values with special chars
+  # - single/double quoted values
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ "$line" == export\ * ]] && line="${line#export }"
+
+    [[ "$line" == *"="* ]] || die "خط نامعتبر در env: $line"
+
+    local key="${line%%=*}"
+    local value="${line#*=}"
+
+    key="${key%"${key##*[![:space:]]}"}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "نام متغیر نامعتبر در env: $key"
+
+    if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+      value="${value:1:${#value}-2}"
+    elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+
+    printf -v "$key" '%s' "$value"
+    export "$key"
+  done <"$env_file"
 }
 
 ensure_dir() {
