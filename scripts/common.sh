@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_NAME="ipsec-vti-autotunnel"
+PROJECT_NAME="ipsec-vti-systemd-tunnel"
 RUNTIME_DIR="/etc/${PROJECT_NAME}"
 RUNTIME_ENV="${RUNTIME_DIR}/runtime.env"
-IPTABLES_ENV="${RUNTIME_DIR}/iptables.env"
 
 log() {
   printf '[INFO] %s\n' "$*"
@@ -34,9 +33,7 @@ command_exists() {
 }
 
 detect_os_support() {
-  if [[ ! -f /etc/os-release ]]; then
-    die "فایل /etc/os-release پیدا نشد؛ سیستم‌عامل پشتیبانی‌شده نیست."
-  fi
+  [[ -f /etc/os-release ]] || die "سیستم‌عامل تشخیص داده نشد (/etc/os-release موجود نیست)."
 
   # shellcheck disable=SC1091
   source /etc/os-release
@@ -46,76 +43,15 @@ detect_os_support() {
 
   case "$os_id" in
     ubuntu)
-      if (( major < 20 )); then
-        die "Ubuntu ${version} پشتیبانی نمی‌شود. حداقل Ubuntu 20.04 لازم است."
-      fi
+      (( major >= 20 )) || die "Ubuntu ${version} پشتیبانی نمی‌شود. حداقل Ubuntu 20.04 لازم است."
       ;;
     debian)
-      if (( major < 11 )); then
-        die "Debian ${version} پشتیبانی نمی‌شود. حداقل Debian 11 لازم است."
-      fi
+      (( major >= 11 )) || die "Debian ${version} پشتیبانی نمی‌شود. حداقل Debian 11 لازم است."
       ;;
     *)
-      die "سیستم‌عامل ${os_id:-unknown} پشتیبانی نمی‌شود. فقط Ubuntu 20.04+ و Debian 11+ پشتیبانی می‌شوند."
+      die "${os_id:-unknown} پشتیبانی نمی‌شود. فقط Ubuntu 20.04+ و Debian 11+ پشتیبانی می‌شوند."
       ;;
   esac
-}
-
-load_env_file() {
-  local env_file="$1"
-  [[ -f "$env_file" ]] || die "فایل env پیدا نشد: $env_file"
-
-  # Parse KEY=VALUE safely without executing shell code.
-  # Supports:
-  # - empty lines / lines starting with '#'
-  # - optional 'export ' prefix
-  # - unquoted values with special chars
-  # - single/double quoted values
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line%$'\r'}"
-    [[ -z "${line//[[:space:]]/}" ]] && continue
-    [[ "$line" =~ ^[[:space:]]*# ]] && continue
-
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-    [[ "$line" == export\ * ]] && line="${line#export }"
-
-    [[ "$line" == *"="* ]] || die "خط نامعتبر در env: $line"
-
-    local key="${line%%=*}"
-    local value="${line#*=}"
-
-    key="${key%"${key##*[![:space:]]}"}"
-    key="${key#"${key%%[![:space:]]*}"}"
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
-
-    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "نام متغیر نامعتبر در env: $key"
-
-    if [[ "$value" == \"*\" && "$value" == *\" ]]; then
-      value="${value:1:${#value}-2}"
-    elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
-      value="${value:1:${#value}-2}"
-    fi
-
-    printf -v "$key" '%s' "$value"
-    export "$key"
-  done <"$env_file"
-}
-
-ensure_dir() {
-  local dir="$1"
-  local mode="$2"
-  install -d -m "$mode" "$dir"
-}
-
-backup_once() {
-  local path="$1"
-  local backup="${path}.ipsec-vti-autotunnel.bak"
-  if [[ -f "$path" && ! -f "$backup" ]]; then
-    cp -a "$path" "$backup"
-    log "Backup created: $backup"
-  fi
 }
 
 safe_write_file() {
@@ -130,20 +66,30 @@ safe_write_file() {
   rm -f "$tmp"
 }
 
-ensure_sysctl_setting() {
-  local key="$1"
-  local value="$2"
-  local file="$3"
-
-  if grep -qE "^${key}=" "$file" 2>/dev/null; then
-    sed -i "s|^${key}=.*|${key}=${value}|" "$file"
-  else
-    printf '%s=%s\n' "$key" "$value" >>"$file"
+backup_once() {
+  local path="$1"
+  local backup="${path}.ipsec-vti-systemd-tunnel.bak"
+  if [[ -f "$path" && ! -f "$backup" ]]; then
+    cp -a "$path" "$backup"
+    log "Backup created: $backup"
   fi
 }
 
 default_route_iface() {
   ip -o route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}'
+}
+
+is_true() {
+  case "${1:-}" in
+    true|TRUE|1|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+parse_forward_rules() {
+  local rules="${1:-}"
+  [[ -n "$rules" ]] || return 0
+  printf '%s' "$rules" | tr ';' '\n' | sed '/^[[:space:]]*$/d'
 }
 
 ensure_iptables_rule() {
@@ -166,27 +112,61 @@ remove_iptables_rule() {
   done
 }
 
-parse_forward_rules() {
-  local rules="$1"
-  [[ -n "$rules" ]] || return 0
-  printf '%s' "$rules" | tr ';' '\n' | sed '/^[[:space:]]*$/d'
+quote_env() {
+  local val="${1:-}"
+  val="${val//\'/\'\"\'\"\'}"
+  printf "'%s'" "$val"
 }
 
-is_true() {
-  local v="${1:-}"
-  [[ "$v" == "1" || "$v" == "true" || "$v" == "TRUE" || "$v" == "yes" || "$v" == "on" ]]
+load_env_file() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || die "فایل env پیدا نشد: $env_file"
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ "$line" == export\ * ]] && line="${line#export }"
+
+    [[ "$line" == *=* ]] || die "خط نامعتبر در env: $line"
+
+    local key="${line%%=*}"
+    local value="${line#*=}"
+
+    key="${key%"${key##*[![:space:]]}"}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "نام متغیر نامعتبر در env: $key"
+
+    if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+      value="${value:1:${#value}-2}"
+    elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+
+    printf -v "$key" '%s' "$value"
+    export "$key"
+  done <"$env_file"
 }
 
-detect_strongswan_service() {
-  if systemctl list-unit-files | awk '{print $1}' | grep -qx 'strongswan-starter.service'; then
-    printf 'strongswan-starter.service\n'
-    return
-  fi
+validate_forward_rules() {
+  local rules="${1:-}"
+  [[ -z "$rules" ]] && return 0
 
-  if systemctl list-unit-files | awk '{print $1}' | grep -qx 'strongswan.service'; then
-    printf 'strongswan.service\n'
-    return
-  fi
+  while IFS=',' read -r proto in_port dst_ip dst_port; do
+    proto="$(echo "$proto" | xargs)"
+    in_port="$(echo "$in_port" | xargs)"
+    dst_ip="$(echo "$dst_ip" | xargs)"
+    dst_port="$(echo "$dst_port" | xargs)"
 
-  printf 'strongswan-starter.service\n'
+    [[ "$proto" == "tcp" || "$proto" == "udp" ]] || die "FORWARD_RULES proto باید tcp یا udp باشد."
+    [[ "$in_port" =~ ^[0-9]{1,5}$ ]] || die "FORWARD_RULES in_port نامعتبر: $in_port"
+    [[ "$dst_port" =~ ^[0-9]{1,5}$ ]] || die "FORWARD_RULES dst_port نامعتبر: $dst_port"
+    [[ "$dst_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "FORWARD_RULES dst_ip نامعتبر: $dst_ip"
+  done < <(parse_forward_rules "$rules")
 }

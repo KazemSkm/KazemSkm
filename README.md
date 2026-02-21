@@ -1,186 +1,138 @@
-# ipsec-vti-autotunnel
+# ipsec-vti-systemd-tunnel
 
-ابزار اتوماتیک برای راه‌اندازی تونل Site-to-Site IPSec (IKEv2 + strongSwan) به‌صورت Route-Based با VTI روی Linux.
+راه‌اندازی خودکار تونل Site-to-Site IPSec با strongSwan (IKEv2) و VTI route-based، کاملاً مدیریت‌شده با systemd.
 
-هدف: نصب سریع، تکرارپذیر (idempotent)، قابل حذف، و مناسب Ubuntu 20.04+ / Debian 11+.
-
-## ویژگی‌ها
-- استفاده از `strongSwan` با `ipsec.conf` و `ipsec.secrets`
-- VTI route-based با `VTI_IF` (پیش‌فرض `vti42`) و `VTI_KEY` (پیش‌فرض `42`)
-- نصب آسان با `.env` + `sudo ./install.sh`
-- بالا آمدن خودکار در بوت (systemd + strongSwan)
-- پشتیبانی از NAT Traversal (UDP 500/4500)
-- پشتیبانی اختیاری از route بین LANهای دو سمت
-- پشتیبانی اختیاری از Port Forwarding روی تونل (DNAT/FORWARD/SNAT)
-- حذف کامل با `sudo ./uninstall.sh`
-- ابزار عیب‌یابی با `sudo ./diagnose.sh`
+## قابلیت‌ها
+- پشتیبانی Ubuntu 20.04+ و Debian 11+
+- اجرای خودکار روی boot با `systemd`
+- بازیابی خودکار سرویس در crash (`Restart=always`)
+- ساخت/حذف داینامیک `vti42`
+- پشتیبانی اختیاری از route بین LAN دو طرف
+- پشتیبانی اختیاری از Port Forwarding
+- دستور آماده `tunnel-status` برای عیب‌یابی سریع
 
 ## ساختار پروژه
 - `README.md`
-- `examples/iran.env.example`
-- `examples/foreign.env.example`
+- `.env.example`
+- `install.sh`
+- `uninstall.sh`
+- `tunnel-status.sh`
 - `scripts/common.sh`
-- `scripts/install.sh`
-- `scripts/uninstall.sh`
-- `scripts/diagnose.sh`
-- `scripts/apply-iptables.sh`
 - `templates/ipsec.conf.tpl`
 - `templates/ipsec.secrets.tpl`
 - `templates/vti-up.sh.tpl`
 - `templates/vti-down.sh.tpl`
-- `templates/ipsec-vti-iptables.service.tpl`
-- `.github/workflows/lint.yml`
+- `templates/ipsec-vti.service.tpl`
 
-## پیش‌نیاز
-- دسترسی root یا sudo
-- هر دو سرور باید public IP قابل دسترس داشته باشند (یا حداقل NAT-T قابل عبور)
-- UDP `500` و `4500` در فایروال/شبکه باز باشد
+## نصب سریع
+
+### سمت ایران
+```bash
+git clone <REPO_URL> ipsec-vti-systemd-tunnel
+cd ipsec-vti-systemd-tunnel
+cp .env.example .env
+# ویرایش .env
+sudo ./install.sh
+```
+
+### سمت خارجی
+```bash
+git clone <REPO_URL> ipsec-vti-systemd-tunnel
+cd ipsec-vti-systemd-tunnel
+cp .env.example .env
+# ویرایش .env با مقادیر معکوس ایران/خارج
+sudo ./install.sh
+```
 
 ## متغیرهای `.env`
-فایل `.env` را کنار `install.sh` بسازید.
-
-الزامی:
 - `ROLE=iran|foreign`
 - `LOCAL_PUBLIC_IP=`
 - `REMOTE_PUBLIC_IP=`
 - `PSK=`
-- `LOCAL_TUN_IP=` (برای ایران معمولاً `10.255.255.1/30`)
-- `REMOTE_TUN_IP=` (برای ایران معمولاً `10.255.255.2`)
+- `LOCAL_TUN_IP=`
+- `REMOTE_TUN_IP=`
+- `LOCAL_LAN_CIDR=` (اختیاری)
+- `REMOTE_LAN_CIDR=` (اختیاری)
+- `FORWARD_RULES=` (اختیاری)
+- `ENABLE_SNAT=true|false` (اختیاری)
+- `PUBLIC_IF=` (اختیاری، در صورت خالی بودن auto-detect)
 
-اختیاری:
-- `LOCAL_ID=` (پیش‌فرض: `LOCAL_PUBLIC_IP`)
-- `REMOTE_ID=` (پیش‌فرض: `REMOTE_PUBLIC_IP`)
-- `VTI_IF=` (پیش‌فرض `vti42`)
-- `VTI_KEY=` (پیش‌فرض `42`)
-- `LOCAL_LAN_CIDR=`
-- `REMOTE_LAN_CIDR=`
-- `FORWARD_RULES=`
-- `PUBLIC_IF=` (اگر خالی باشد، auto-detect)
-- `ENABLE_SNAT=true|false` (اگر `FORWARD_RULES` ست شده باشد و این مقدار خالی باشد، پیش‌فرض `true`)
+نکته: اگر PSK شامل کاراکترهای خاص است، داخل `'` یا `"` قرار دهید.
 
-فرمت `FORWARD_RULES`:
-- `FORWARD_RULES="tcp,443,10.20.0.10,443;tcp,80,10.20.0.10,80"`
-
-## Quickstart (هر دو سمت)
-
-### 1) روی سرور ایران
-```bash
-git clone <YOUR_REPO_URL> ipsec-vti-autotunnel
-cd ipsec-vti-autotunnel
-cp examples/iran.env.example .env
-# فایل .env را ویرایش کنید
-sudo ./install.sh
-```
-
-### 2) روی سرور خارجی
-```bash
-git clone <YOUR_REPO_URL> ipsec-vti-autotunnel
-cd ipsec-vti-autotunnel
-cp examples/foreign.env.example .env
-# فایل .env را ویرایش کنید
-sudo ./install.sh
-```
-
-### 3) بررسی وضعیت
-```bash
-sudo ./diagnose.sh
-```
-
-## مثال حداقلی (فقط تونل)
-سمت ایران:
+## مثال حداقلی
+ایران:
 ```env
 ROLE=iran
 LOCAL_PUBLIC_IP=203.0.113.10
 REMOTE_PUBLIC_IP=198.51.100.20
-PSK=use-a-long-random-string
+PSK='LongRandomPSK...'
 LOCAL_TUN_IP=10.255.255.1/30
 REMOTE_TUN_IP=10.255.255.2
 ```
 
-سمت خارجی:
+خارجی:
 ```env
 ROLE=foreign
 LOCAL_PUBLIC_IP=198.51.100.20
 REMOTE_PUBLIC_IP=203.0.113.10
-PSK=use-a-long-random-string
+PSK='LongRandomPSK...'
 LOCAL_TUN_IP=10.255.255.2/30
 REMOTE_TUN_IP=10.255.255.1
 ```
 
-## مثال route بین LANها
+## مثال LAN Routing
 ایران:
 ```env
 LOCAL_LAN_CIDR=10.10.0.0/24
 REMOTE_LAN_CIDR=10.20.0.0/24
 ```
 
-خارجی (برعکس):
+خارجی:
 ```env
 LOCAL_LAN_CIDR=10.20.0.0/24
 REMOTE_LAN_CIDR=10.10.0.0/24
 ```
 
-## مثال Port Forwarding روی تونل
-فرض: روی سرور ایران می‌خواهیم پورت 443 عمومی به `10.20.0.10:443` در سمت خارجی ارسال شود:
-
+## مثال Port Forward
 ```env
-FORWARD_RULES=tcp,443,10.20.0.10,443
+FORWARD_RULES="tcp,443,10.20.0.10,443;tcp,80,10.20.0.10,80"
 ENABLE_SNAT=true
+PUBLIC_IF=eth0
 ```
 
-مثال چند قانون:
-```env
-FORWARD_RULES=tcp,443,10.20.0.10,443;tcp,80,10.20.0.10,80
-ENABLE_SNAT=true
-```
-
-## دستورات روزمره
-نصب:
+## دستور وضعیت
+پس از نصب:
 ```bash
-sudo ./install.sh
+tunnel-status
 ```
 
-حذف:
+این دستور خروجی‌های زیر را نشان می‌دهد:
+- `systemctl status ipsec-vti --no-pager`
+- `ipsec statusall`
+- `ip a show vti42`
+- `ip route`
+- `iptables -t nat -L -n -v` و `iptables -L -n -v`
+
+## حذف
 ```bash
 sudo ./uninstall.sh
 ```
 
-تشخیص مشکل:
-```bash
-sudo ./diagnose.sh
-```
-
-## رفتار idempotent
-- اجرای چندباره `install.sh` باعث تکرار قوانین iptables نمی‌شود.
-- فایل‌های حساس قبل از جایگزینی backup می‌شوند:
-  - `/etc/ipsec.conf.ipsec-vti-autotunnel.bak`
-  - `/etc/ipsec.secrets.ipsec-vti-autotunnel.bak`
-- uninstall فقط artefactهای ساخته‌شده توسط همین پروژه را حذف می‌کند.
-
-## نکات امنیتی
-- فایل `.env` را commit نکنید (`PSK` محرمانه است).
-- از PSK طولانی و تصادفی استفاده کنید.
-- PSK را دوره‌ای rotate کنید.
-- دسترسی SSH را محدود کنید (کلید SSH، allowlist IP، Fail2ban، پورت/Policy مناسب).
-- لاگ‌ها را بررسی کنید و در صورت نیاز `LOCAL_ID/REMOTE_ID` را دقیق تنظیم کنید.
-
 ## Troubleshooting
-1. اگر تونل بالا نمی‌آید:
-- `sudo ./diagnose.sh`
-- چک کنید UDP 500/4500 در مسیر شبکه باز باشد.
-- چک کنید `PSK`, `LOCAL_ID`, `REMOTE_ID` در هر دو طرف match باشند.
+1. UDP 500 و UDP 4500 در دو طرف باید باز باشد.
+2. مقادیر `PSK`، `LOCAL_PUBLIC_IP` و `REMOTE_PUBLIC_IP` در هر دو سمت باید هماهنگ باشند.
+3. اگر route برقرار نیست، `LOCAL_LAN_CIDR` و `REMOTE_LAN_CIDR` را بررسی کنید.
+4. اگر forwarding مشکل دارد، `PUBLIC_IF` و فرمت `FORWARD_RULES` را چک کنید.
+5. وضعیت کامل را با `tunnel-status` ببینید.
 
-2. اگر پکت‌ها از تونل عبور نمی‌کنند:
-- مقدار `rp_filter` باید `0` باشد.
-- route مربوط به `REMOTE_LAN_CIDR` باید روی VTI ثبت شده باشد.
-- MTU را کمتر تست کنید (مثلاً `1400`).
+## توصیه‌های امنیتی
+- PSK را هرگز commit نکنید.
+- از PSK طولانی و تصادفی استفاده کنید.
+- دسترسی SSH را محدود کنید.
+- PSK را دوره‌ای rotate کنید.
+- لاگ‌ها را منظم بررسی کنید.
 
-3. اگر Port Forwarding کار نمی‌کند:
-- `FORWARD_RULES` را بررسی کنید (فرمت CSV صحیح باشد).
-- `PUBLIC_IF` درست باشد (یا auto-detect درست انجام شده باشد).
-- در صورت مشکل مسیر برگشت، `ENABLE_SNAT=true` بگذارید.
-
-## فرض‌های طراحی
-- این ابزار برای سناریوی دو سرور Linux (iran/foreign) و strongSwan starter نوشته شده است.
-- backend فایروال روی iptables در نظر گرفته شده است.
-- برای پایداری قوانین فایروال پس از reboot از سرویس systemd اختصاصی استفاده شده (به‌جای iptables-persistent).
+## فرض‌های اجرایی
+- پشتیبانی best-effort فقط روی Ubuntu 20.04+ و Debian 11+.
+- backend فایروال مبتنی بر iptables در نظر گرفته شده است.
+- سرویس systemd اختصاصی `ipsec-vti.service` مدیریت lifecycle تونل را انجام می‌دهد.

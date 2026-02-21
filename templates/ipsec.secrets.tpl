@@ -1,1 +1,1 @@
-__LOCAL_ID__ __REMOTE_ID__ : PSK "__PSK__"
+__LOCAL_PUBLIC_IP__ __REMOTE_PUBLIC_IP__ : PSK "__PSK__"
